@@ -1,0 +1,241 @@
+find_overlap=function(object,
+                      method="Bayesian",
+                      input_type=c("Genes", "Geneset"),
+                      input,
+                      verbose=T
+                      
+){
+  library(viridis)
+  ###Functions
+  get_genes=function(object, genes){
+    if(length(genes)==1){
+      return(object@data@norm_exp[genes, ])
+    }else{
+      return(as.data.frame(t(object@data@norm_exp[genes, ])))
+    }
+  }
+  Transforme_Geneset_to_List=function(object, Geneset){
+    library(dplyr)
+    GS=object@used_genesets
+    GS1=GS %>% filter(GS$ont %in% Geneset) 
+    geneSets=lapply(1:length(Geneset), function(i){GS1[GS1$ont==Geneset[i], "gene" ]})
+    names(geneSets)=Geneset
+    
+    return(geneSets)
+    
+  }
+  
+  
+  if(verbose==T){message("Start ... find_overlap ....")}
+  
+  expr=object@data@norm_exp
+  
+  if(verbose==T){message("Extract Input ....")}
+  
+  if(input_type=="Genes"){
+    
+    #### Extract Genes of interest from the Dataframe
+    df=get_genes(object, input)
+    
+  }else{if(input_type=="Geneset"){
+    
+    ##### use GSVA to create Gene Set scores
+    #1. Transforme Geneset to list
+    GeneSet=Transforme_Geneset_to_List(object, Geneset=input)
+    
+    gs_out=GSVA::gsva(expr, GeneSet, mx.diff=1, parallel.sz=6, method="zscore", verbose=F)
+    #Normalize Score 
+    normalize_DHH=function(x){(x-min(x))/(max(x)-min(x))}
+    df=normalize_DHH(t(gs_out))
+    
+  }else{stop("input_type not found")}}
+  
+  
+  if(verbose==T){message("Start Spatial Correlation ....")}
+  
+  
+  if(method=="Bayesian"){
+    
+    # df contains a data.frame whci will be correlated to estimate the spatial overlap
+    
+    #Script 
+    model_string <- "
+    model {
+    for(i in 1:n) {
+    x[i,1:2] ~ dmnorm(mu[], prec[ , ])
+    }
+
+    # Constructing the covariance matrix and the corresponding precision matrix.
+    prec[1:2,1:2] <- inverse(cov[,])
+    cov[1,1] <- sigma[1] * sigma[1]
+    cov[1,2] <- sigma[1] * sigma[2] * rho
+    cov[2,1] <- sigma[1] * sigma[2] * rho
+    cov[2,2] <- sigma[2] * sigma[2]
+
+    # Uninformative priors on all parameters which could, of course, be made more informative.
+    sigma[1] ~ dunif(0, 1000) 
+    sigma[2] ~ dunif(0, 1000)
+    rho ~ dunif(-1, 1)
+    mu[1] ~ dnorm(0, 0.001)
+    mu[2] ~ dnorm(0, 0.001)
+
+    # Generate random draws from the estimated bivariate normal distribution
+    x_rand ~ dmnorm(mu[], prec[ , ])
+    }
+    "
+    library(rjags)
+    library(mvtnorm) 
+    library(car) 
+    set.seed(31415)
+    
+    if(verbose==T){message("Start Bayesian Correlation .... That will take a while....")}
+    x=df
+    data_list = list(x = df, n = nrow(df))
+    inits_list = list(mu = c(mean(x[, 1]), mean(x[, 2])),
+                      rho = cor(x[, 1], x[, 2]),
+                      sigma = c(sd(x[, 1]), sd(x[, 1])))
+    
+    if(verbose==T){message("Start Bayesian Correlation .... Fit the model....")}
+    
+    jags_model <- jags.model(textConnection(model_string), data = data_list, inits = inits_list,n.adapt = 500, n.chains = 3, quiet = T);update(jags_model, 500)
+    
+    if(verbose==T){message("Start Bayesian Correlation .... Fit Markov chain Monte Carlo.... ")}
+    
+    mcmc_samples <- coda.samples(jags_model, c("mu", "rho", "sigma", "x_rand"), n.iter = 1000)
+    
+    if(verbose==T){message("Start Bayesian Correlation .... Create Output.... ")}
+    
+    samples_mat <- as.matrix(mcmc_samples)
+    Estimated_Correlation=mean(samples_mat[, "rho"])
+    
+    #create correlation_output
+    
+    #plot
+    
+    #Estimated Data
+    df_plot_estimated=data.frame(samples_mat[, c("x_rand[1]", "x_rand[2]")])
+    names(df_plot_estimated)=names(df)
+    df_plot_estimated$type="Estimated"
+    
+    df_plot_realdata=data.frame(x[,1], (x[,2]))
+    names(df_plot_realdata)=names(df)
+    rownames(df_plot_realdata)=rownames(df)
+    df_plot_realdata$type="Real"
+    
+    df_plot=rbind(df_plot_estimated, df_plot_realdata)
+    
+    #fit a model
+    
+    x <- df_plot_estimated[,1]
+    y <- df_plot_estimated[,2]
+    model <- loess(y~x, span = 0.75 )
+    loess=data.frame(x=predict(model, seq(min(x),max(x),length.out = 3000)), y=seq(min(x),max(x),length.out = 3000))
+    loess$col="Loess Fit"; loess$size=0.1
+    #plot
+    library(ggplot2)
+    library(ggthemes)
+    
+    Bayesian_plot=ggplot() +
+      geom_point(data=df_plot, aes(x=df_plot[,1], y=df_plot[,2], color=df_plot[,3], alpha=0.6))+
+      geom_line(data=loess, aes(x=x, y=y, color=col))+
+      labs(title=paste0("Bayesian Spatial Co-Expression mean RHO: ",round(Estimated_Correlation, digits = 2) ), x =names(df_plot)[1], y = names(df_plot)[2])+
+      scale_color_brewer("Bayesian Prediction", palette="Set1")+
+      geom_vline (xintercept=0, linetype = "dotted") +
+      geom_hline (yintercept=0, linetype = "dotted") +
+      guides(size=F, alpha=F)+
+      theme_classic()+
+      theme(panel.border = element_rect(colour = "black", fill=NA, size=0.2))
+    
+    ##Spatial overlap
+    
+    df_spatial_overlap=data.frame(x=object@fdata$X,y=object@fdata$Y,Sum=rowSums(df[rownames(object@fdata),1:2]))
+    spatial_overlap=ggplot() +
+      geom_point(data=df_spatial_overlap, aes(x=x, y=y, color=Sum, size=0.05))+
+      labs(title=paste0("Bayesian Spatial Co-Expression mean RHO: ",round(Estimated_Correlation, digits = 2) ), x ="", y = "")+
+      scale_colour_viridis_c("Bayesian Prediction", option = "inferno")+
+      guides(size=F)+
+      theme_map()
+    
+    
+    ##Output data file
+    Export_find_overlap=list(
+      Estimation=Estimated_Correlation,
+      plot=Bayesian_plot,
+      datafile=df,
+      Bayesian=df_plot,
+      fit=loess,
+      df_spatial_overlap=df_spatial_overlap,
+      plot_spatial_overlap=spatial_overlap
+    )
+    
+  }
+  
+  
+  
+  
+  if(method=="classic"){
+    
+    
+    #Pearson Coorrelation
+    library(dplyr)
+    Estimated_Correlation=cor(df[,1], df[,2])
+    df_plot=df %>% as.data.frame()
+    df_plot_estimated=df_plot
+    df_plot$type="Real"
+    
+    #fit a model
+    
+    x <- df_plot_estimated[,1]
+    y <- df_plot_estimated[,2]
+    model <- glm(y~x)
+    loess=data.frame(x=as.numeric(predict(model, newdata=data.frame(y = x))), y=x)
+    loess$col="GLM Fit"; loess$size=0.1
+    #plot
+    library(ggplot2)
+    library(ggthemes)
+    
+    Pearson_plot=ggplot() +
+      geom_point(data=df_plot, aes(x=df_plot[,1], y=df_plot[,2], color=df_plot[,3], alpha=0.6))+
+      geom_line(data=loess, aes(x=x, y=y, color=col))+
+      labs(title=paste0("Pearson Spatial Co-Expression mean RHO: ",round(Estimated_Correlation, digits = 2) ), x =names(df_plot)[1], y = names(df_plot)[2])+
+      scale_color_brewer("Pearson Prediction", palette="Set1")+
+      geom_vline (xintercept=0, linetype = "dotted") +
+      geom_hline (yintercept=0, linetype = "dotted") +
+      guides(size=F, alpha=F)+
+      theme_classic()+
+      xlim(-1,1)+ylim(-1,1)+
+      theme(panel.border = element_rect(colour = "black", fill=NA, size=0.2))
+    
+    ##Spatial overlap
+    
+    df_spatial_overlap=data.frame(x=object@coordinates$x,y=object@coordinates$y,Sum=rowSums(df[object@coordinates$barcodes,1:2]))
+    spatial_overlap=ggplot() +
+      geom_point(data=df_spatial_overlap, aes(x=x, y=y, color=Sum, size=0.05))+
+      labs(title=paste0("Pearson Spatial Co-Expression mean RHO: ",round(Estimated_Correlation, digits = 2) ), x ="", y = "")+
+      scale_colour_viridis("Pearson Prediction", option = "inferno")+
+      guides(size=F)+
+      theme_classic()
+    
+    
+    ##Output data file
+    Export_find_overlap=list(
+      Estimation=Estimated_Correlation,
+      plot=Pearson_plot,
+      datafile=df,
+      Bayesian=df_plot,
+      fit=loess,
+      df_spatial_overlap=df_spatial_overlap,
+      plot_spatial_overlap=spatial_overlap
+    )
+    
+    
+    
+    
+  }
+  
+  # df contains a data.frame whci will be correlated to estimate the spatial overlap
+  
+  
+  return(Export_find_overlap)
+  
+}
