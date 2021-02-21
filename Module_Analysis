@@ -1,0 +1,523 @@
+#
+#
+#
+#
+#
+#          Analysis of spatial Gene Expression and Meta-Modules
+#
+#
+#
+#
+#
+#
+#
+#
+#
+
+# 1. SPARK and Pattern Recognition ----------------------------------------
+
+
+##Select Tumor samples
+feat_select = feature_visium %>% filter(Q == "ok", Region=="T")
+
+
+# RUN SPARK ----------------------------------------
+
+#Here object is a SPATAobj
+
+
+library(SPARK)
+    
+location=object@coordinates %>% select(x,y) 
+rownames(location)=object@coordinates$barcodes
+    
+#Create Spark object
+spark <- CreateSPARKObject(counts=object@data@counts, 
+                               location=location ,
+                               percentage = percentage, 
+                               min_total_counts = min_total_counts)
+# Run Analysis 
+spark@lib_size <- apply(spark@counts, 2, sum)
+spark <- spark.vc(spark, 
+                      covariates = NULL, 
+                      lib_size = spark@lib_size, 
+                      num_core = 5,
+                      verbose = T)
+spark <- spark.test(spark, check_positive = T, verbose = T)
+outs=data.frame(spark@res_mtest)
+    
+# SPARK object need to be saved and processed in the next part
+
+
+
+
+# Merge all SPARK outputs  ----------------------------------------
+
+list_SPARK=lapply(1:nrow(feat_select), function(rr){
+    
+    ### Create spata Object from feature list
+    message(paste0("Data will be load... Sample: ",feat_select$folder[rr] ))
+    SPARKobj=readRDS(paste0(path_visium, "/", feat_select$folder[rr], "/Analysis/SPARK.RDS"))
+    res=SPARKobj@res_mtest[order(SPARKobj@res_mtest$adjusted_pvalue, decreasing = F),c("combined_pvalue", "adjusted_pvalue")]
+    sig=res %>% dplyr::filter(adjusted_pvalue < 0.001) %>% tibble::rownames_to_column("Genes") %>% dplyr::select(Genes, adjusted_pvalue)
+    return(sig)
+  })
+names(list_SPARK)=feat_select$folder
+  
+#Create an Overlap matrix (Jaccard Index)
+
+Jaccard.call <- function(Set1, Set2){
+  Sum <- sum(length(Set1)+length(Set2))
+  return(length(intersect(Set1, Set2))/Sum)
+}
+
+Oveverlap_matrix=matrix(0, length(list_SPARK), length(list_SPARK))
+colnames(Oveverlap_matrix)=rownames(Oveverlap_matrix)=names(list_SPARK)
+for(i1 in 1:length(list_SPARK)){
+    n1=names(list_SPARK)[i1]
+    for(i2 in 1:length(list_SPARK)){
+      n2=names(list_SPARK)[i2]
+      print(c(n1, n2))
+      Oveverlap_matrix[n1, n2]<- length(intersect(list_SPARK[[n1]]$Genes, list_SPARK[[n2]]$Genes))
+      
+    } 
+  }
+
+
+#### Ploting the Results
+
+
+
+#Create Connection file
+con_all=as.data.frame(do.call(rbind, lapply(1:length(list_SPARK), function(i1){
+  n1=names(list_SPARK)[i1]
+  con_all1=as.data.frame(do.call(rbind, lapply(1:length(list_SPARK), function(i2){
+    n2=names(list_SPARK)[i2]
+    print(c(n1, n2))
+    overlap<- length(intersect(list_SPARK[[n1]]$Genes, list_SPARK[[n2]]$Genes))
+    if(n1!=n2){ret=data.frame(From=n1, To=n2, nr=overlap)}else{print("Skip.... similar"); ret=data.frame(From=NA, To=NA, nr=NA)}
+    return(ret)
+    
+    
+  })))
+  
+  return(con_all1)
+})))
+con_all=na.omit(con_all)
+con_all=con_all[order(con_all$nr, decreasing = T), ]
+con_all=con_all[seq(1,nrow(con_all), by=2), ] 
+
+#Plot circlize plot with overlap
+library(circlize)
+chordDiagram(con_all)
+
+library(igraph)
+network <- graph_from_data_frame(d=con_all, directed=F)
+plot(network, edge.width=E(network)$nr/500, edge.curved=0.2)
+
+
+#extract all genes with an overlapp in all tumor samples 
+
+genes=as.character(Reduce(intersect, lapply(1:length(list_SPARK), function(i) list_SPARK[[i]]$Genes) ))
+
+ 
+# Performe spatial correlation to predict the pattern  ----------------------------------------
+ 
+
+ 
+ #loop over all samples with tumor:
+ list_overlap_cluster=lapply(1:nrow(feat_select), function(rr){
+   
+   ### Create spata Object from feature list
+   ##Load object
+   message(paste0("Data will be load... Sample: ",feat_select$folder[rr] ))
+   SPATAobj=readRDS(paste0(path_visium, "/", feat_select$folder[rr], "/Analysis/SPATAobj.RDS"))
+   SPATAobj=Transform_object(SPATAobj, of_sample = feat_select$folder[rr])
+   
+   ## get genes
+   genes=intersect(genes, getGenes(SPATAobj))
+   overlap_mat_cor=matrix(NA, length(genes), length(genes))
+   rownames(overlap_mat_cor)=colnames(overlap_mat_cor)=genes
+   for(i1 in 1:length(genes)){
+     g1=genes[i1]
+     for(i2 in 1:length(genes)){
+       g2=genes[i2]
+       out=find_overlap(SPATAobj, input=c(g1,g2), input_type = "Genes", verbose = F)[["Estimation"]]
+       overlap_mat_cor[i1,i2]=out
+     } 
+   }
+   #plotHeatmapCluster(overlap_mat_cor, color_nn=5)
+   return(overlap_mat_cor)
+ })
+ names(list_overlap_cluster)=feat_select$folder
+ 
+ #saveRDS(list_overlap_cluster, "list_overlap_cluster.RDS")
+ 
+ heatmap(list_overlap_cluster[[5]], col=brewer.pal(9,"Reds"))
+ 
+ ilterate.diffusion.map <- function(list,...){
+   
+   col <- colorRampPalette(confuns::clrp_milo)(length(list))
+   plist <- lapply(1:length(list), function(i){
+     #dm <- destiny::DiffusionMap(list[[i]], n_eigs=3)@eigenvectors %>% as.data.frame()
+     dm <- irlba::prcomp_irlba(list[[i]], n=3)$rotation %>% as.data.frame()
+     names(dm) <- c("PC1", "PC2", "PC3")
+     p=ggplot()+theme_classic()+geom_point(data=dm, aes(x=PC1, y=PC2), color=col[i])
+     return(p)
+   })
+   return(cowplot::plot_grid(plotlist = plist, align = "hv"))
+ }
+ ilterate.diffusion.map(list=list_overlap_cluster)
+ 
+ 
+# Cluster Analysis  ----------------------------------------
+ 
+ #list_overlap_cluster=readRDS("list_overlap_cluster.RDS")
+ 
+ #Function to run mutiple cluster validation on a list containing numeric matrix 
+ Run.Cluster.val <- function(list, kmax){
+ 
+ 
+ pam1 <- function(x,k) list(cluster = cluster::pam(x,k, cluster.only=TRUE))
+ hc1 <- function(x, k) list(cluster = cutree(hclust(dist(x, method = "euclidean"), method="average"), k = k))
+ cluster.val <- function(df,kmax,...){
+   pb$tick()$print()
+   cluster::clusGap(df, K.max = kmax, verbose=F, B = 20, ...)
+ }
+ 
+ 
+ pb <- progress_estimated(length(list)*3)
+ df.inp <- 
+  data.frame(ID=names(list)) %>% 
+  as_tibble() %>% 
+  mutate(kMeans=purrr::map(list, .f= ~cluster.val(.,kmax,FUN = kmeans, nstart = 50)),
+         PAM=purrr::map(list, .f= ~cluster.val(.,kmax,FUN=pam1)),
+         HC=purrr::map(list, .f= ~cluster.val(.,kmax,FUN=hc1))
+         )
+ 
+ return(df.inp)
+ 
+ }
+ 
+ cluster.val <- Run.Cluster.val(list_overlap_cluster, kmax=10)
+ 
+ ilterate.line <- function(df,...){
+   col <- data.frame(col= colorRampPalette(confuns::clrp_milo)(ncol(df))) %>% t() %>% as.data.frame()
+   names(col) <- names(df)
+   
+   p=ggplot()+theme_classic()
+   for(i in names(df)){
+     p=p+geom_line(data=df, mapping=aes(x=1:nrow(df), y=!!sym(i)),color=col[,i],...)}
+   return(p)
+ }
+ 
+## Plot Gap plots across cluster methods and samples
+ 
+  purrr::map_df(.x=as.list(cluster.val$kMeans), ~.$Tab[,"gap"] ) %>% 
+    ilterate.line()
+  
+  purrr::map_df(.x=as.list(cluster.val$PAM), ~.$Tab[,"gap"] ) %>% 
+    ilterate.line()
+  
+  purrr::map_df(.x=as.list(cluster.val$HC), ~.$Tab[,"gap"] ) %>% 
+    ilterate.line()
+
+ ## Reduce similar genes 
+ genes_similar=as.character(Reduce(intersect, lapply(1:length(list_overlap_cluster), function(i) rownames(list_overlap_cluster[[i]]) )))
+ 
+ 
+ #Rank genes based on importance
+ df <- purrr::map_df(.x=list_overlap_cluster, .f=~colnames(.x))
+
+ 
+ #Reduce Matrix with similar genes
+ for(i in 1:length(list_overlap_cluster)){list_overlap_cluster[[i]][genes_similar, genes_similar]}
+ 
+ #Merged Matrix
+ merged_mat_cor=matrix(0,length(genes_similar), length(genes_similar))
+ rownames(merged_mat_cor)=colnames(merged_mat_cor)=genes_similar
+ 
+ list_overlap_cluster2=lapply(list_overlap_cluster, function(i) rownames_to_column(as.data.frame(i)))
+ out_test= as.data.frame(do.call(rbind, list_overlap_cluster2)) %>% 
+   group_by(rowname) %>% 
+   summarise_all(mean) %>% 
+   as.data.frame()
+ 
+ rownames(out_test) = out_test$rowname
+ out_test$rowname=NULL
+ 
+ plotHeatmapCluster(as.matrix(out_test), color_nn=15)
+ new_gene_set=getCluster(data.use=as.matrix(out_test), num.nn=20)
+ 
+ cluster <- plotHeatmapCluster(as.matrix(out_test), color_nn=15)
+ new_gene_set <-data.frame(Cluster=sort(cutree(cluster$tree_row, k=6))) %>% mutate(ID=rownames(.)) %>% dplyr::select(ID, Cluster)
+ 
+ rownames(new_gene_set) <- new_gene_set$ID
+ 
+ 
+ ##Validation
+ cluster.val <- Run.Cluster.val(list(S1=as.matrix(out_test)), kmax=10)
+ 
+ purrr::map_df(.x=cluster.val[1, 2:4] %>% as.list(), .f=~(.x$S1$Tab[,"gap"]) ) %>% 
+ ilterate.line()
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+  
+  
+  
+
+
+# Shared Transcriptional Programs ----------------------------------------
+ ## Find overlapping gene signature 
+ tumor_samples <- feature_visium %>% filter(Region=="T")
+ samples=as.character(tumor_samples$folder)
+ DE_ALL_Tumor=lapply(1:length(samples), function(i){
+   of_sample=samples[i]
+   print(of_sample)
+   object=readRDS(paste0("/Users/HenrikHeiland/Desktop/SpatialTranscriptomics/Visium/Visium/",of_sample, "/Analysis/SPATAobj.RDS"))
+   object<-Transform_object(object, of_sample = of_sample)
+   
+   #DE
+   
+   DE=find_DE(object,
+              of_sample,
+              feature="RNA_snn_res.0.8",
+              verbose=T,
+              method="wilcox")
+   DE=DE %>% dplyr::filter(p_val_adj < 0.05 & avg_logFC > 0.2 | avg_logFC < c(-0.2))
+   
+   #Cluster Distance
+   Dist_mat=GetDistanceHeatmap(object, of_sample,Feat="RNA_snn_res.0.8")
+   return(list(DE,Dist_mat))
+ })
+ names(DE_ALL_Tumor)=samples
+ saveRDS(DE_ALL_Tumor, file="Liste_DE_Genes_all_Tumors.RDS")
+ 
+ DE_ALL_Tumor <- readRDS("Liste_DE_Genes_all_Tumors.RDS")
+ 
+ samples <- names(DE_ALL_Tumor)
+ 
+ DE_comb=as.data.frame(do.call(rbind, lapply(1:length(DE_ALL_Tumor), function(i){
+   
+   signature_genes=
+     DE_ALL_Tumor[[samples[i]]][[1]] %>%
+     dplyr::filter(avg_logFC < c(-2) | avg_logFC>2) %>%
+     dplyr::select(cluster, gene) %>% 
+     dplyr::mutate(cluster_named=paste0(samples[i], "_Cluster_", cluster),
+                   sample=samples[i])
+ })))
+ 
+ cluster_u=unique(DE_comb$cluster_named)
+ mat=matrix(NA,length(cluster_u), length(cluster_u));rownames(mat)=colnames(mat)=cluster_u
+ 
+ #Matrix with intersected genes 
+ for(i1 in 1: length(cluster_u)){
+   c1=cluster_u[i1]
+   
+   for(i2 in 1:length(cluster_u)){
+     c2=cluster_u[i2]
+     
+     inter=intersect(
+       DE_comb %>% filter(cluster_named==c1) %>% pull(gene),
+       DE_comb %>% filter(cluster_named==c2) %>% pull(gene))
+     
+     mat[i1,i2]= length(c(c1,c2))/c(length(inter)+1)
+     
+   }
+ }
+ 
+ dim(mat)
+ 
+ #get nested dataframe and check crosslink to other samples
+ shared_list=list()
+ 
+ for(ii in 1:length(samples)){
+   print(sample(samples[ii]))
+   test <-
+     DE_comb %>% 
+     filter(sample==samples[ii]) %>% 
+     #filter (! duplicated(gene)) %>%
+     group_by(cluster_named) %>%
+     summarise(ids = list(gene))
+   
+   #check overlapp
+   matcom=as.matrix(do.call(cbind,lapply(1:nrow(test), function(i){
+     
+     mat=matrix(0,length(test$ids[[i]]), length(cluster_u));rownames(mat)=test$ids[[i]];colnames(mat)=cluster_u
+     for(iz in 1:ncol(mat)){
+       
+       gene_c=DE_comb %>% filter(cluster_named==colnames(mat)[iz]) %>% pull(gene)
+       
+       mat[rownames(mat) %in% gene_c,  colnames(mat)[iz] ]= 1 
+       
+     }
+     shared=rownames(data.frame(Sum=colSums(t(mat)) ) %>% arrange(desc(Sum)) %>% head(50))
+     shared_list <<- c(shared_list, list(as.character(shared)))
+     
+     mat=t(mat[order(rowSums(mat)), order(colSums(mat))])
+     return(mat)
+     
+   })))
+   
+ }
+ 
+ 
+ shared <- purrr::map(shared_list, ~length(.)) %>% unlist() %>% sort()
+ 
+ ggplot(mapping=aes(y=shared, x=1:length(shared_list)))+
+   geom_bar(stat="identity", color="grey", alpha=0.5)+theme_classic()
+ 
+ 
+ 
+ order_s <- colSums(mat) %>% sort() %>% names()
+ myBreaks <- c(seq(0, 0.02, length.out=3), 
+               seq(0.03, 1, length.out=5))
+ pheatmap::pheatmap(mat[order_s,order_s],
+                    color = brewer.pal(9,"Reds"),
+                    #breaks = myBreaks
+                    )
+ 
+ 
+ common_genes=unique(unlist(shared_list))
+ 
+ #get correlation matrix from cds
+ #cds <- readRDS("cds.RDS") -> Merged all Tumor files
+ library(widyr)
+ gene_mat=as.matrix(t(normalized_counts(cds)[common_genes, ]))
+ gene_mat=cor(gene_mat)
+ 
+ ##Validation
+ cluster.val <- Run.Cluster.val(list(S1=gene_mat), kmax=10)
+ 
+ purrr::map_df(.x=cluster.val[1, 2:4] %>% as.list(), .f=~(.x$S1$Tab[,"gap"]) ) %>% 
+   ilterate.line()
+ 
+  
+ dm <- irlba::prcomp_irlba(gene_mat, n=3)$rotation %>% as.data.frame()
+ dm <- destiny::DiffusionMap(gene_mat, n_eigs=3)@eigenvectors %>% as.data.frame()
+ names(dm) <- c("PC1", "PC2", "PC3")
+ rownames(dm) <-  rownames(gene_mat) 
+ ggplot()+theme_classic()+geom_point(data=dm, aes(x=PC1, y=PC2+PC3, color=PC1) ) +scale_color_viridis_c()
+ 
+ 
+ cl=plotHeatmapCluster(data =gene_mat, color_nn=20)
+ cl
+ Cluster=data.frame(cluster=sort(cutree(cl$tree_row, k=6))) %>% tibble::rownames_to_column("gene")
+ saveRDS(Cluster, "Shared_Cluster_Sig.RDS")
+ 
+ 
+ 
+# 3. Compare Classes and classifications -------------------------------------
+
+
+#Load Genesets and Cluster definitions
+Spatial_Cluster=readRDS("MILO_SP_Genesets_Spation.RDS")
+Module_Cluster=readRDS("Shared_Cluster_Sig.RDS")
+Neftel=c("Neftel_OPClike", "Neftel_NPC_Comb", "Neftel_AClike","Neftel_Mes_Comb", "Neftel_G2.M")
+ReaktiveAstro=c("MILO_A1",  "MILO_A2", "MILO_fetal", "MILO_adult")
+ReaktiveAstro2=getGeneSets(object, index="Lid")
+
+for(i in 1:length(unique(Module_Cluster$cluster))){ object <- addGeneSet(object,overwrite = T, 
+                                                                  class_name="SPATA", 
+                                                                  gs_name= Cluster_names[i], 
+                                                                  genes = Module_Cluster %>% filter(cluster==i) %>% pull(gene) )}
+
+
+Module_Cluster=getGeneSets(object, index="SPATA")
+
+
+## For Cluster comparison (input a list of vectors)
+getListGS=function(object, of_gene_sets){
+  out=lapply(1:length(of_gene_sets), function(i) getGenes(object, of_gene_sets = of_gene_sets[i]))
+  names(out)=of_gene_sets
+  return(out)
+}
+getListGS2=function(df, genes, GeneSet){
+  out=lapply(1:dplyr::n_distinct(df[,GeneSet]) , function(i) df %>% 
+                  filter(!!rlang::sym(GeneSet)==unique(df[,GeneSet])[i]) %>% 
+                  dplyr::pull(!!rlang::sym(genes)) %>% 
+                  as.character()
+                )
+  names(out)=unique(df[,GeneSet])
+  return(out)
+}
+
+# Get Lists
+Spatial_Cluster=Spatial_Cluster %>% mutate(GS=paste0("Spatial_Pattern_", Cluster))
+Spatial_Cluster_List=getListGS2(Spatial_Cluster, genes="ID", GeneSet="GS")
+
+
+Module_Cluster_List=getListGS(object, of_gene_sets = Module_Cluster)
+Neftel_List=getListGS(object, of_gene_sets = Neftel)
+ReaktiveAstro_List=getListGS(object, of_gene_sets = ReaktiveAstro)
+ReaktiveAstro2_List=getListGS(object, of_gene_sets = ReaktiveAstro2)
+
+#merge Lists
+
+merge=c(Spatial_Cluster_List, Module_Cluster_List, Neftel_List, ReaktiveAstro_List, ReaktiveAstro2_List)
+mat_merge=matrix(0, length(merge), length(merge));colnames(mat_merge)=rownames(mat_merge)=names(merge)
+
+for(i1 in 1:length(merge)){
+  for(i2 in 1:length(merge)){
+    mat_merge[i1,i2] <-
+      
+      (length(
+        dplyr::intersect(
+          merge[[i1]],
+          merge[[i2]]
+        ))) /
+      length(c(merge[[i2]]))
+      
+  }
+}
+
+
+mat_merge[upper.tri(mat_merge)]<- NA
+mat_merge[lower.tri(mat_merge)]<- NA
+
+pheatmap::pheatmap(mat_merge[c(1:3, 5:10), c(1:3, 5:10)],
+                   cluster_rows = F,
+                   cluster_cols = F,
+                   na_col = "white",
+                   border_color = NA)
+
+pheatmap::pheatmap(mat_merge[c(5:10, 11:14), c(5:10, 11:14)],
+                   cluster_rows = F,
+                   cluster_cols = F,
+                   na_col = "white",
+                   border_color = NA)
+
+pheatmap::pheatmap(mat_merge[c(5:10, 16:19), c(5:10, 16:19)],
+                   cluster_rows = F,
+                   cluster_cols = F,
+                   na_col = "white",
+                   border_color = NA)
+
+pheatmap::pheatmap(mat_merge[c(5:10, 20:22), c(5:10, 20:22)],
+                   cluster_rows = F,
+                   cluster_cols = F,
+                   na_col = "white",
+                   border_color = NA)
+
+
+
+
+
+
+
+
+
+
+  
+  
+  
+  
+  
+  
+  
