@@ -1,0 +1,132 @@
+# Output from inferCNV
+#CNV <- read.table("infercnv.outliers_removed.observations.txt")
+#pos <- read.csv("gene_pos.csv")
+
+
+CNV_plot <- function(CNV, pos, subset=NULL, class=NULL){
+      
+      print(class);print(subset)
+      
+      if(is.null(class)){
+        
+        if(is.null(subset)){
+          
+          if(is.null(subset)){cells=names(CNV)}else{cells=subset %>% str_replace(pattern = "-", replacement = ".")}
+          
+          print("No Class")  
+          
+          plotCNV_data <- data.frame(mean=apply(CNV[,cells],1,median), sd=apply(CNV[,cells],1,sd))
+          plotCNV_data <- 
+            plotCNV_data %>% 
+            tibble::rownames_to_column("hgnc_symbol") %>% 
+            left_join(., pos, by="hgnc_symbol")
+          plotCNV_data %>% group_by(chromosome_name) %>% summarise_all(length) %>%  pull(hgnc_symbol) -> Chr_vector 
+          
+          p=ggplot(plotCNV_data, aes(x=1:nrow(plotCNV_data), y=mean))+
+            geom_smooth(method = "loess", span=0.08, se = FALSE)+
+            geom_ribbon(aes(ymin=mean-sd,ymax=mean+sd),alpha=0.2)+
+            theme_classic()
+          p=p+geom_vline(xintercept=0, linetype="dashed", alpha=0.5)
+          #p=p+geom_text(aes(x=Chr_vector[1], y=max(plotCNV_data$mean)+max(plotCNV_data$sd), label=paste0("Chr", 0)), hjust="middle")
+          
+          for(z in 1:length(Chr_vector))
+          {
+            index=Chr_vector[z]+sum(Chr_vector[1:z])
+            
+            p=p+geom_vline(xintercept=index, linetype="dashed", alpha=0.5)
+            #geom_text(aes(x=index, y=max(plotCNV_data$mean)+max(plotCNV_data$sd), label=paste0("Chr", 0)), hjust="middle")
+          }
+          
+          return(p)
+          
+        }else{
+          if(!is.null(subset)){
+            
+            if(is.null(subset)){cells=names(CNV)}else{cells=subset %>% str_replace(pattern = "-", replacement = ".")}
+            
+            print("No Class")  
+            
+            plotCNV_data <- data.frame(mean=apply(CNV[,cells],1,median), sd=apply(CNV[,cells],1,sd))
+            plotCNV_data <- 
+              plotCNV_data %>% 
+              tibble::rownames_to_column("hgnc_symbol") %>% 
+              left_join(., pos, by="hgnc_symbol")
+            plotCNV_data %>% group_by(chromosome_name) %>% summarise_all(length) %>%  pull(hgnc_symbol) -> Chr_vector 
+            
+            p=ggplot(plotCNV_data, aes(x=1:nrow(plotCNV_data), y=mean))+
+              geom_smooth(method = "loess", span=0.08, se = FALSE)+
+              geom_ribbon(aes(ymin=mean-sd,ymax=mean+sd),alpha=0.2)+
+              theme_classic()
+            p=p+geom_vline(xintercept=0, linetype="dashed", alpha=0.5)
+            #p=p+geom_text(aes(x=Chr_vector[1], y=max(plotCNV_data$mean)+max(plotCNV_data$sd), label=paste0("Chr", 0)), hjust="middle")
+            
+            for(z in 1:length(Chr_vector))
+            {
+              index=Chr_vector[z]+sum(Chr_vector[1:z])
+              
+              p=p+geom_vline(xintercept=index, linetype="dashed", alpha=0.5)
+              #geom_text(aes(x=index, y=max(plotCNV_data$mean)+max(plotCNV_data$sd), label=paste0("Chr", 0)), hjust="middle")
+            }
+            
+            return(p)
+            
+          }
+        }
+        
+      }else{
+        print("Class")
+        #classes
+        
+        nr_of_class=length(unique(class))
+        if(length(class)!=ncol(CNV))stop("class vector unequal CNV data")
+        
+        class_df <- data.frame(ID=names(CNV), class=class)
+        plotCNV_data <- data.frame(mean=apply(CNV[,],1,median), sd=apply(CNV[,],1,sd))
+        
+        plotCNV_data <- 
+          plotCNV_data %>% 
+          tibble::rownames_to_column("hgnc_symbol") %>% 
+          left_join(., pos, by="hgnc_symbol") %>% 
+          mutate(x=1:nrow(plotCNV_data))
+        
+        plotCNV_data %>% group_by(chromosome_name) %>% summarise_all(length) %>%  pull(hgnc_symbol) -> Chr_vector 
+        
+        getPalette = colorRampPalette(confuns::clrp_milo)(nr_of_class)
+        
+        
+        p=ggplot(plotCNV_data, aes(x=x, y=mean))+
+          geom_ribbon(aes(ymin=mean-sd,ymax=mean+sd),alpha=0.2)+
+          theme_classic()
+        p=p+geom_vline(xintercept=0, linetype="dashed", alpha=0.5)
+        
+        for(z in 1:length(Chr_vector))
+        {
+          index=Chr_vector[z]+sum(Chr_vector[1:z])
+          
+          p=p+geom_vline(xintercept=index, linetype="dashed", alpha=0.5)
+          #geom_text(aes(x=index, y=max(plotCNV_data$mean)+max(plotCNV_data$sd), label=paste0("Chr", 0)), hjust="middle")
+        }
+        #add lines for classes
+        for(z in 1:nr_of_class) 
+        {
+          cells <- class_df %>% filter(class==class[z]) %>% pull(ID)
+          data_plot_class <- data.frame(mean=apply(CNV[,cells],1,median), sd=apply(CNV[,cells],1,sd))
+          
+          data_plot_class <- 
+            data_plot_class %>% 
+            tibble::rownames_to_column("hgnc_symbol") %>% 
+            left_join(., pos, by="hgnc_symbol") %>% 
+            mutate(x=1:nrow(data_plot_class))
+          
+          
+          
+          p=p+geom_smooth(data=data_plot_class,
+                          mapping=aes(x=x, y=mean), color=getPalette[z],
+                          method = "loess", span=0.08, se = FALSE)}
+        
+        p
+        
+        return(p)
+      }
+      
+    }
