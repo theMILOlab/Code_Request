@@ -1,0 +1,103 @@
+
+#CNV analysis using InferCNV
+
+#Ref_CNV.RDS and chromosome_arm_positions_grch38.txt are available upon request.
+
+find_CNV=function(object,
+                  verbose=T,
+                  Ref_data_SPATA="....Ref_CNV.RDS",
+                  Output_folder
+){
+  
+  setwd(Output_folder)
+  
+  if(verbose==T){message("Create input....")}
+  #
+  library(dplyr)
+  data_mat=object@data@counts
+  annotations_file= object@fdata %>% dplyr::select(sample)
+  rownames(annotations_file)=object@fdata$barcodes
+  
+  if(verbose==T){message("Load Reference Data....")}
+  
+  ref=readRDS(Ref_data_SPATA)
+  reference_data_matrix=ref[["Counts"]]
+  reference_data_anno=ref[["annotations_file"]]
+  
+  ### Combine data sets
+  
+  genes_inter=intersect(rownames(data_mat), rownames(reference_data_matrix))
+  length(genes_inter)
+  
+  expr_inter=cbind(data_mat[genes_inter,], reference_data_matrix[genes_inter,])
+  anno_inter=rbind(annotations_file, reference_data_anno)
+  
+  if(verbose==T){message("Get genomic position....")}
+  
+  
+  ### Get gene positions
+  library(CONICSmat)
+  suva_expr = expr_inter
+  
+  regions=read.table("chromosome_arm_positions_grch38.txt",sep="\t",row.names = 1,header = T)
+  head(regions,n=5)
+  gene_pos=getGenePositions(rownames(suva_expr))
+  
+  write.csv(gene_pos, "gene_pos.csv")
+  
+  if(verbose==T){message("Start Analysis....")}
+  
+  
+  library(infercnv)
+  infercnv_obj = CreateInfercnvObject(
+    raw_counts_matrix=suva_expr,
+    annotations_file=anno_inter,
+    gene_order_file=data.frame(gene_pos$chromosome_name, gene_pos$start_position, gene_pos$end_position, row.names = gene_pos$hgnc_symbol),
+    ref_group_names=c("ref"))
+  
+  
+  cutoff=0.1
+  infercnv_obj <- infercnv:::require_above_min_mean_expr_cutoff(infercnv_obj, cutoff)
+  # filter out bad cells
+  min_cells_per_gene=3
+  infercnv_obj <- infercnv:::require_above_min_cells_ref(infercnv_obj, min_cells_per_gene=min_cells_per_gene)
+  ## for safe keeping
+  infercnv_orig_filtered = infercnv_obj
+  infercnv_obj <- infercnv:::normalize_counts_by_seq_depth(infercnv_obj)
+  infercnv_obj <- infercnv:::anscombe_transform(infercnv_obj)
+  infercnv_obj <- infercnv:::log2xplus1(infercnv_obj)
+  threshold = mean(abs(infercnv:::get_average_bounds(infercnv_obj)))
+  infercnv_obj <- infercnv:::apply_max_threshold_bounds(infercnv_obj, threshold=threshold)
+  infercnv_obj = infercnv:::smooth_by_chromosome(infercnv_obj, window_length=101, smooth_ends=TRUE)
+  infercnv_obj <- infercnv:::center_cell_expr_across_chromosome(infercnv_obj, method = "median")
+  infercnv_obj <- infercnv:::subtract_ref_expr_from_obs(infercnv_obj, inv_log=TRUE)
+  infercnv_obj <- infercnv:::invert_log2(infercnv_obj)
+  infercnv_obj <- infercnv:::clear_noise_via_ref_mean_sd(infercnv_obj, sd_amplifier = 1.5)
+  infercnv_obj = infercnv:::remove_outliers_norm(infercnv_obj)
+  infercnv_obj = infercnv:::define_signif_tumor_subclusters(infercnv_obj, p_val=0.05,hclust_method='ward.D2', 
+                                                            cluster_by_groups=TRUE, partition_method='qnorm')
+  
+  saveRDS(infercnv_obj, file="infercnv_obj.RDS")
+  
+  
+  plot_cnv(infercnv_obj, 
+           out_dir=Output_folder,
+           k_obs_groups=5,
+           cluster_by_groups=T,
+           output_filename='infercnv.outliers_removed', 
+           color_safe_pal = FALSE, 
+           x.range="auto", 
+           x.center=1, 
+           output_format="pdf",
+           title = "outliers removed")
+  
+  setwd(Output_folder)
+  #Load cluster
+  cluster=read.table("infercnv.outliers_removed.observation_groupings.txt")
+  
+  return(list(cluster=cluster))
+  
+  
+  
+  
+}
