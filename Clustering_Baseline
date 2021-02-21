@@ -1,0 +1,114 @@
+## Run baseline clustering and benchmarking:
+
+#Start multiple cluster analysis 
+    
+    #SPATA_to_Seurat
+    
+    seuratObj <- SPATA::compileSeuratObject(obj,
+                                            SCTransform = T,
+                                            NormalizeData = T,
+                                            FindVariableFeatures = T,
+                                            ScaleData = T,
+                                            RunPCA = T,
+                                            FindNeighbors = T,
+                                            FindClusters = T,
+                                            RunTSNE = T,
+                                            RunUMAP = T)
+    
+    
+    #SNN-Analysis:
+    
+    cluster_summary=data.frame(SNN=length(unique(seuratObj@meta.data$seurat_clusters)) )
+    
+    #Run Graphed based cluster on normal PCA
+    ggsave("cluster_SNN_TSNE.png",DimPlot(seuratObj, group.by="seurat_clusters", pt.size=2))
+    
+    #Run Graphed based cluster on normal GLM-PCA
+    library(glmpca)
+    library(scry)
+    library(Seurat)
+    library(SeuratWrappers)
+    
+    m <- GetAssayData(seuratObj, slot = "counts", assay = "RNA")
+    devs <- scry::devianceFeatureSelection(m)
+    dev_ranked_genes <- rownames(seuratObj)[order(devs, decreasing = TRUE)]
+    topdev <- head(dev_ranked_genes, 2000)
+    
+    
+    
+    ndims <- 10
+    
+    RunGLMPCA2 <- function (object, L = 5, assay = NULL, features = NULL, reduction.name = "glmpca", reduction.key = "GLMPC_", verbose = TRUE, ...) {
+      #CheckPackage(package = "glmpca", repository = "CRAN")
+      if (!inherits(x = object, what = "Seurat")) {
+        stop("'object' must be a Seurat object", call. = FALSE)
+      }
+      assay <- assay %||% DefaultAssay(object = object)
+      DefaultAssay(object = object) <- assay
+      features <- features %||% VariableFeatures(object)
+      data <- GetAssayData(object = object, slot = "counts")
+      features <- intersect(x = features, y = rownames(x = data))
+      if (length(x = features) == 0) {
+        stop("Please specify a subset of features for GLM-PCA")
+      }
+      data <- data[features, ]
+      glmpca_results <- glmpca:::glmpca(Y = data, L = L, ...)
+      glmpca_dimnames <- paste0(reduction.key, 1:L)
+      colnames(x = glmpca_results$factors) <- glmpca_dimnames
+      colnames(x = glmpca_results$loadings) <- glmpca_dimnames
+      factors_l2_norm <- apply(X = glmpca_results$factors, MARGIN = 2, 
+                               FUN = function(x) {
+                                 sqrt(x = crossprod(x = x))
+                               })
+      object[[reduction.name]] <- CreateDimReducObject(embeddings = as.matrix(x = glmpca_results$factors), 
+                                                       key = reduction.key, loadings = as.matrix(x = glmpca_results$loadings), 
+                                                       stdev = factors_l2_norm, assay = assay, global = TRUE, 
+                                                       misc = list(glmpca_results))
+      object <- LogSeuratCommand(object = object)
+      return(object)
+    }
+    
+    seuratObj <- RunGLMPCA2(seuratObj, features = topdev, L = ndims)
+    seuratObj <- FindNeighbors(seuratObj, reduction = 'glmpca', dims = 1:ndims, verbose = FALSE)
+    seuratObj <- FindClusters(seuratObj, verbose = FALSE)
+    seuratObj <- RunTSNE(seuratObj, reduction = 'glmpca', dims = 1:ndims, verbose = FALSE)
+    
+    ggsave("cluster_GLM_PCA_SNN_TSNE.png",DimPlot(seuratObj, group.by="seurat_clusters", pt.size=2))
+    
+    
+    cluster_summary$GLM_PCA <- length(unique(seuratObj@meta.data$seurat_clusters)) 
+    
+    
+    #PAM Cluster
+    
+    
+    pam1 <- function(x,k) list(cluster = cluster::pam(x,k, cluster.only=TRUE))
+    
+    
+    gap_stat_kmeans <- cluster::clusGap(seuratObj@reductions$pca[,1:5], 
+                                        FUN = kmeans, 
+                                        nstart = 25,
+                                        K.max = 10, 
+                                        B = 2)
+    
+    gap_stat_pam <- cluster::clusGap(seuratObj@reductions$pca[,1:5], 
+                                     FUN = pam1, 
+                                     K.max = 10, 
+                                     B = 2)
+    
+    cluster_summary$kmeans <- which.max(gap_stat_kmeans$Tab %>% as.data.frame() %>% pull(gap) ) 
+    cluster_summary$pam <- which.max(gap_stat_pam$Tab %>% as.data.frame() %>% pull(gap) ) 
+    cluster_summary <- 
+      cluster_summary %>% t() %>% as.data.frame() %>% rownames_to_column("methods")
+    
+    
+    ggsave("Cluster_plot.pdf", device="pdf",
+           ggplot(data=cluster_summary, aes(x=methods, y=V1))+geom_bar(stat="identity", color="grey", alpha=0.5)+theme_classic()
+    )
+    
+    
+    ggsave("cluster.png",SPATA::plotSurface(obj, color_to = "seurat_clusters", pt_size=4))
+    
+    
+    
+    
